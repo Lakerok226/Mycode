@@ -1,0 +1,656 @@
+
+import mysql.connector
+
+DB_NAME = "clients_db"
+
+# Для MAMP чаще всего:
+# host = 127.0.0.1
+# user = root
+# password = root
+# port = 8889
+DB_CONFIG = {
+    "host": "127.0.0.1",
+    "user": "root",
+    "password": "root",
+    "port": 8889
+}
+
+
+def get_server_connection():
+    return mysql.connector.connect(**DB_CONFIG)
+
+
+def get_connection():
+    return mysql.connector.connect(**DB_CONFIG, database=DB_NAME)
+
+
+def init_db():
+    conn = get_server_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        f"""
+        CREATE DATABASE IF NOT EXISTS {DB_NAME}
+        CHARACTER SET utf8mb4
+        COLLATE utf8mb4_unicode_ci
+        """
+    )
+
+    cursor.close()
+    conn.close()
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS clients (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            fio VARCHAR(255) NOT NULL,
+            phone VARCHAR(50) NOT NULL,
+            email VARCHAR(255) NOT NULL,
+            company VARCHAR(100) NOT NULL,
+            notes TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """
+    )
+
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+
+def add_client(data):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        INSERT INTO clients (fio, phone, email, company, notes)
+        VALUES (%s, %s, %s, %s, %s)
+        """,
+        (
+            data["fio"],
+            data["phone"],
+            data["email"],
+            data["company"],
+            data["notes"]
+        )
+    )
+
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+
+def update_client(client_id, data):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        UPDATE clients
+        SET fio = %s, phone = %s, email = %s, company = %s, notes = %s
+        WHERE id = %s
+        """,
+        (
+            data["fio"],
+            data["phone"],
+            data["email"],
+            data["company"],
+            data["notes"],
+            client_id
+        )
+    )
+
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+
+def delete_client(client_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        DELETE FROM clients
+        WHERE id = %s
+        """,
+        (client_id,)
+    )
+
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+
+def get_client(client_id):
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    cursor.execute(
+        """
+        SELECT id, fio, phone, email, company, notes
+        FROM clients
+        WHERE id = %s
+        """,
+        (client_id,)
+    )
+
+    client = cursor.fetchone()
+
+    cursor.close()
+    conn.close()
+
+    return client
+
+
+def build_filters(search, company):
+    where = []
+    params = []
+
+    if search:
+        where.append("fio LIKE %s")
+        params.append(f"%{search}%")
+
+    if company:
+        where.append("company = %s")
+        params.append(company)
+
+    if where:
+        return " WHERE " + " AND ".join(where), params
+
+    return "", params
+
+
+def count_clients(search="", company=""):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    where_sql, params = build_filters(search, company)
+
+    cursor.execute(
+        f"""
+        SELECT COUNT(*)
+        FROM clients
+        {where_sql}
+        """,
+        params
+    )
+
+    total = cursor.fetchone()[0]
+
+    cursor.close()
+    conn.close()
+
+    return total
+
+
+def get_clients(search="", company="", limit=5, offset=0):
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    where_sql, params = build_filters(search, company)
+
+    params.append(limit)
+    params.append(offset)
+
+    cursor.execute(
+        f"""
+        SELECT id, fio, phone, email, company, notes, created_at
+        FROM clients
+        {where_sql}
+        ORDER BY id DESC
+        LIMIT %s OFFSET %s
+        """,
+        params
+    )
+
+    clients = cursor.fetchall()
+
+    cursor.close()
+    conn.close()
+
+    return clients
+
+from math import ceil
+import re
+
+from flask import Flask, render_template, request, redirect, url_for
+
+from db import (
+    init_db,
+    add_client,
+    update_client,
+    delete_client,
+    get_client,
+    get_clients,
+    count_clients
+)
+
+app = Flask(__name__)
+
+# Конфигурация
+app.config["PAGE_SIZE"] = 5
+
+app.config["COMPANIES"] = [
+    "Яндекс",
+    "Сбер",
+    "VK",
+    "Ozon",
+    "Wildberries"
+]
+
+EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
+PHONE_RE = re.compile(r"^[0-9+\-()]+$")
+
+
+def get_form_data():
+    return {
+        "fio": request.form.get("fio", "").strip(),
+        "phone": request.form.get("phone", "").strip(),
+        "email": request.form.get("email", "").strip(),
+        "company": request.form.get("company", "").strip(),
+        "notes": request.form.get("notes", "").strip()
+    }
+
+
+def validate_client(data):
+    errors = {}
+
+    if not data["fio"]:
+        errors["fio"] = "Поле ФИО обязательно."
+
+    if not data["phone"]:
+        errors["phone"] = "Поле телефон обязательно."
+    elif not PHONE_RE.match(data["phone"]):
+        errors["phone"] = "Телефон может содержать только цифры и символы + - ( )."
+    elif not any(char.isdigit() for char in data["phone"]):
+        errors["phone"] = "Телефон должен содержать хотя бы одну цифру."
+
+    if not data["email"]:
+        errors["email"] = "Поле e-mail обязательно."
+    elif not EMAIL_RE.match(data["email"]):
+        errors["email"] = "Введите корректный e-mail."
+
+    if not data["company"]:
+        errors["company"] = "Выберите компанию."
+    elif data["company"] not in app.config["COMPANIES"]:
+        errors["company"] = "Компания должна быть выбрана из списка."
+
+    if not data["notes"]:
+        errors["notes"] = "Поле заметки обязательно."
+
+    return errors
+
+
+def get_list_context():
+    search = request.args.get("q", "").strip()
+    company_filter = request.args.get("company", "").strip()
+
+    if company_filter not in app.config["COMPANIES"]:
+        company_filter = ""
+
+    page = request.args.get("page", 1, type=int)
+
+    if page < 1:
+        page = 1
+
+    page_size = app.config["PAGE_SIZE"]
+
+    total = count_clients(search, company_filter)
+    pages = max(1, ceil(total / page_size))
+
+    if page > pages:
+        page = pages
+
+    offset = (page - 1) * page_size
+
+    clients = get_clients(
+        search=search,
+        company=company_filter,
+        limit=page_size,
+        offset=offset
+    )
+
+    return clients, total, page, pages, search, company_filter
+
+
+@app.route("/", methods=["GET", "POST"])
+def index():
+    errors = {}
+    form = {
+        "fio": "",
+        "phone": "",
+        "email": "",
+        "company": "",
+        "notes": ""
+    }
+
+    if request.method == "POST":
+        form = get_form_data()
+        errors = validate_client(form)
+
+        if not errors:
+            add_client(form)
+            return redirect(url_for("index", msg="added"))
+
+    clients, total, page, pages, search, company_filter = get_list_context()
+
+    messages = {
+        "added": "Клиент успешно добавлен.",
+        "updated": "Клиент успешно обновлён.",
+        "deleted": "Клиент успешно удалён."
+    }
+
+    msg_key = request.args.get("msg", "")
+    message = messages.get(msg_key, "")
+
+    return render_template(
+        "index.html",
+        mode="add",
+        form=form,
+        errors=errors,
+        clients=clients,
+        companies=app.config["COMPANIES"],
+        total=total,
+        page=page,
+        pages=pages,
+        q=search,
+        company_filter=company_filter,
+        message=message
+    )
+
+
+@app.route("/edit/<int:client_id>", methods=["GET", "POST"])
+def edit_client_page(client_id):
+    client = get_client(client_id)
+
+    if client is None:
+        return "Клиент не найден", 404
+
+    errors = {}
+    form = client
+
+    if request.method == "POST":
+        form = get_form_data()
+        form["id"] = client_id
+
+        errors = validate_client(form)
+
+        if not errors:
+            update_client(client_id, form)
+            return redirect(url_for("index", msg="updated"))
+
+clients, total, page, pages, search, company_filter = get_list_context()
+
+    return render_template(
+        "index.html",
+        mode="edit",
+        form=form,
+        errors=errors,
+        clients=clients,
+        companies=app.config["COMPANIES"],
+        total=total,
+        page=page,
+        pages=pages,
+        q=search,
+        company_filter=company_filter,
+        message=""
+    )
+
+
+@app.route("/delete/<int:client_id>", methods=["POST"])
+def delete_client_page(client_id):
+    confirm_delete = request.form.get("confirm_delete")
+
+    if confirm_delete == "yes":
+        delete_client(client_id)
+
+    return redirect(url_for("index", msg="deleted"))
+
+
+if name == "__main__":
+    init_db()
+    app.run(debug=True)
+
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Учет клиентов</title>
+
+    <link rel="stylesheet" href="https://www.w3schools.com/w3css/4/w3.css">
+
+    <style>
+        textarea {
+            resize: vertical;
+        }
+
+        .error-text {
+            color: #d32f2f;
+            font-size: 14px;
+        }
+
+        .actions form {
+            display: inline;
+        }
+    </style>
+</head>
+<body class="w3-light-grey">
+
+<div class="w3-container w3-blue">
+    <h2>Учет клиентов</h2>
+</div>
+
+<div class="w3-content w3-margin-top" style="max-width: 1100px;">
+
+    {% if message %}
+        <div class="w3-panel w3-green w3-card">
+            <p>{{ message }}</p>
+        </div>
+    {% endif %}
+
+    <div class="w3-card w3-white w3-padding">
+        {% if mode == "edit" %}
+            <h3>Редактирование клиента</h3>
+        {% else %}
+            <h3>Добавление клиента</h3>
+        {% endif %}
+
+        {% if errors %}
+            <div class="w3-panel w3-pale-red w3-border">
+                <p><b>Исправьте ошибки:</b></p>
+                <ul>
+                    {% for error in errors.values() %}
+                        <li>{{ error }}</li>
+                    {% endfor %}
+                </ul>
+            </div>
+        {% endif %}
+
+        <form method="POST"
+              action="{% if mode == 'edit' %}{{ url_for('edit_client_page', client_id=form.id) }}{% else %}{{ url_for('index') }}{% endif %}">
+
+            <p>
+                <label>ФИО</label>
+                <input class="w3-input w3-border" type="text" name="fio" value="{{ form.get('fio', '') }}">
+                {% if errors.get('fio') %}
+                    <span class="error-text">{{ errors.get('fio') }}</span>
+                {% endif %}
+            </p>
+
+            <p>
+                <label>Телефон</label>
+                <input class="w3-input w3-border" type="text" name="phone" value="{{ form.get('phone', '') }}">
+                {% if errors.get('phone') %}
+                    <span class="error-text">{{ errors.get('phone') }}</span>
+                {% endif %}
+            </p>
+
+            <p>
+                <label>E-mail</label>
+                <input class="w3-input w3-border" type="text" name="email" value="{{ form.get('email', '') }}">
+                {% if errors.get('email') %}
+                    <span class="error-text">{{ errors.get('email') }}</span>
+                {% endif %}
+            </p>
+
+            <p>
+                <label>Компания</label>
+                <select class="w3-select w3-border" name="company">
+                    <option value="">-- выберите компанию --</option>
+                    {% for company in companies %}
+                        <option value="{{ company }}"
+                                {% if form.get('company', '') == company %}selected{% endif %}>
+                            {{ company }}
+                        </option>
+                    {% endfor %}
+                </select>
+                {% if errors.get('company') %}
+                    <span class="error-text">{{ errors.get('company') }}</span>
+                {% endif %}
+            </p>
+
+            <p>
+                <label>Заметки</label>
+                <textarea class="w3-input w3-border" name="notes" rows="4">{{ form.get('notes', '') }}</textarea>
+                {% if errors.get('notes') %}
+                    <span class="error-text">{{ errors.get('notes') }}</span>
+                {% endif %}
+            </p>
+
+            <p>
+                {% if mode == "edit" %}
+                    <button class="w3-button w3-green" type="submit">Сохранить изменения</button>
+                    <a class="w3-button w3-gray" href="{{ url_for('index') }}">Отмена</a>
+                {% else %}
+                    <button class="w3-button w3-blue" type="submit">Добавить клиента</button>
+                {% endif %}
+            </p>
+        </form>
+    </div>
+
+    <div class="w3-card w3-white w3-padding w3-margin-top">
+        <h3>Поиск и фильтрация</h3>
+
+<form method="GET" action="{{ url_for('index') }}" class="w3-row-padding">
+            <div class="w3-third">
+                <label>Поиск по ФИО</label>
+                <input class="w3-input w3-border" type="text" name="q" value="{{ q }}">
+            </div>
+
+            <div class="w3-third">
+                <label>Фильтр по компании</label>
+                <select class="w3-select w3-border" name="company">
+                    <option value="">Все компании</option>
+                    {% for company in companies %}
+                        <option value="{{ company }}"
+                                {% if company_filter == company %}selected{% endif %}>
+                            {{ company }}
+                        </option>
+                    {% endfor %}
+                </select>
+            </div>
+
+            <div class="w3-third">
+                <label>&nbsp;</label>
+                <button class="w3-button w3-blue w3-block" type="submit">Применить</button>
+            </div>
+        </form>
+
+        <p>
+            <a class="w3-button w3-light-grey w3-margin-top" href="{{ url_for('index') }}">Сбросить</a>
+        </p>
+    </div>
+
+    <div class="w3-card w3-white w3-padding w3-margin-top w3-margin-bottom">
+        <h3>Список клиентов</h3>
+
+        <p>Всего записей: <b>{{ total }}</b></p>
+
+        {% if clients %}
+            <div class="w3-responsive">
+                <table class="w3-table-all w3-hoverable">
+                    <thead>
+                    <tr class="w3-blue">
+                        <th>ID</th>
+                        <th>ФИО</th>
+                        <th>Телефон</th>
+                        <th>E-mail</th>
+                        <th>Компания</th>
+                        <th>Заметки</th>
+                        <th>Действия</th>
+                    </tr>
+                    </thead>
+
+                    <tbody>
+                    {% for client in clients %}
+                        <tr>
+                            <td>{{ client.id }}</td>
+                            <td>{{ client.fio }}</td>
+                            <td>{{ client.phone }}</td>
+                            <td>{{ client.email }}</td>
+                            <td>{{ client.company }}</td>
+                            <td>{{ client.notes }}</td>
+                            <td class="actions">
+                                <a class="w3-button w3-small w3-green"
+                                   href="{{ url_for('edit_client_page', client_id=client.id) }}">
+                                    Редактировать
+                                </a>
+
+                                <form method="POST"
+                                      action="{{ url_for('delete_client_page', client_id=client.id) }}"
+                                      onsubmit="return confirm('Вы действительно хотите удалить клиента?');">
+                                    <input type="hidden" name="confirm_delete" value="yes">
+                                    <button class="w3-button w3-small w3-red" type="submit">
+                                        Удалить
+                                    </button>
+                                </form>
+                            </td>
+                        </tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="w3-bar w3-margin-top">
+                {% if page > 1 %}
+                    <a class="w3-button w3-border"
+                       href="{{ url_for('index', page=page-1, q=q, company=company_filter) }}">
+                        Назад
+                    </a>
+                {% endif %}
+
+                {% for p in range(1, pages + 1) %}
+                    {% if p == page %}
+                        <span class="w3-button w3-blue">{{ p }}</span>
+                    {% else %}
+                        <a class="w3-button w3-border"
+                           href="{{ url_for('index', page=p, q=q, company=company_filter) }}">
+                            {{ p }}
+                        </a>
+
+{% endif %}
+                {% endfor %}
+
+                {% if page < pages %}
+                    <a class="w3-button w3-border"
+                       href="{{ url_for('index', page=page+1, q=q, company=company_filter) }}">
+                        Вперед
+                    </a>
+                {% endif %}
+            </div>
+        {% else %}
+            <div class="w3-panel w3-pale-yellow w3-border">
+                <p>Клиенты не найдены.</p>
+            </div>
+        {% endif %}
+    </div>
+
+</div>
+
+</body>
+</html>
